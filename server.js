@@ -91,7 +91,7 @@ app.post('/api/roadmap', async (req, res) => {
     ) {
       model = 'gpt-4o'; // emotional, cinematic, perfect for initial clients
     } else {
-      model = 'gpt-5-mini'; // higher tier, scalable, resource-heavy responses
+      model = 'gpt-5-nano'; // premium, faster, deeper reasoning
     }
 
     console.log(`💡 Using model: ${model}`);
@@ -114,26 +114,51 @@ Write as if you're talking directly to them:
 Make it feel like Chris is personally guiding them toward their comeback.
     `.trim();
 
-    // ====== GENERATE RESPONSE ======
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: 'system', content: CHRIS_TONE },
-        { role: 'user', content: prompt }
-      ],
-      temperature: 0.9,
-      max_tokens: 800
-    });
+    // ====== GENERATE RESPONSE WITH FAILOVER ======
+    let roadmapText;
+    let source = 'primary';
 
-    const roadmapText =
-      completion.choices[0]?.message?.content?.trim() ||
-      'Roadmap unavailable.';
+    try {
+      console.log(`🎯 Generating roadmap with ${model}...`);
+      const completion = await client.chat.completions.create({
+        model,
+        messages: [
+          { role: 'system', content: CHRIS_TONE },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.9,
+        max_tokens: 800
+      });
+
+      roadmapText =
+        completion.choices[0]?.message?.content?.trim() ||
+        'Roadmap unavailable.';
+    } catch (primaryError) {
+      console.error('⚠️ Primary model failed:', primaryError.message);
+      console.log('🔄 Switching to backup model: gpt-4o');
+
+      const fallback = await client.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: CHRIS_TONE },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.9,
+        max_tokens: 800
+      });
+
+      roadmapText =
+        fallback.choices[0]?.message?.content?.trim() ||
+        'Fallback roadmap unavailable.';
+      source = 'fallback';
+    }
 
     console.log('✅ Generated Roadmap:\n', roadmapText);
 
     res.status(200).json({
       ok: true,
       model,
+      source,
       roadmap: roadmapText
     });
   } catch (error) {

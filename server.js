@@ -6,31 +6,48 @@ const OpenAI = require('openai');
 
 const app = express();
 
-// ----- MIDDLEWARE -----
+// ====== MIDDLEWARE ======
 app.use(cors());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// ----- HEALTH CHECK / TEST -----
+// ====== HEALTH CHECK ======
 app.get('/test', (req, res) => {
   res.json({
     ok: true,
-    message: 'Webhook reached the backend successfully.'
+    message: 'xGO GETTERSx Roadmap backend is live ✅'
   });
 });
 
-// ----- OPENAI CLIENT -----
+// ====== OPENAI CLIENT ======
 const client = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY
 });
 
-// ----- MAIN WEBHOOK ROUTE -----
+// ====== YOUR PERMANENT VOICE DNA ======
+const CHRIS_TONE = `
+You are the voice of Chris Villagracia — founder of xGO GETTERSx.
+
+Write exactly like him using these rules:
+
+- Simple, real talk.
+- Speak with emotion and clarity, like a mentor who truly cares.
+- Use short, powerful sentences with space between them.
+- Sound like a friend who believes in them.
+- Use emojis naturally (1 per sentence max 2, never spam).
+- Bold key words or ideas.
+- Every message should end with motivation or a next step.
+- Stay warm, cinematic, and deeply human.
+- Never sound robotic or over-formal.
+`;
+
+// ====== MAIN WEBHOOK ROUTE ======
 app.post('/api/roadmap', async (req, res) => {
   try {
     console.log('🔔 Incoming GHL webhook:');
     console.log(JSON.stringify(req.body, null, 2));
 
-    // Try to normalize contact data from GHL/webhook.site
+    // Extract contact + roadmap info
     const contact =
       req.body.contact ||
       req.body.contactData ||
@@ -47,67 +64,94 @@ app.post('/api/roadmap', async (req, res) => {
     const goal =
       req.body["What’s your biggest goal in life right now?"] ||
       req.body.goal ||
-      req.body.Goal ||
       'get results';
 
     const stuck =
       req.body["What’s making you feel stuck right now?"] ||
       req.body.stuck ||
-      req.body.challenge ||
       '';
 
-    // Build the prompt for OpenAI
+    const level =
+      req.body.level ||
+      req.body.plan ||
+      req.body.package ||
+      req.body.tier ||
+      'free';
+
+    // ====== MODEL LOGIC BY LEVEL ======
+    let model;
+    if (
+      level.includes('Level 1') ||
+      level.includes('Level 2') ||
+      level.toLowerCase().includes('spark') ||
+      level.toLowerCase().includes('breakthrough') ||
+      level.toLowerCase().includes('300') ||
+      level.toLowerCase().includes('900') ||
+      level.toLowerCase().includes('free')
+    ) {
+      model = 'gpt-4o'; // emotional, cinematic, perfect for initial clients
+    } else {
+      model = 'gpt-5-mini'; // higher tier, scalable, resource-heavy responses
+    }
+
+    console.log(`💡 Using model: ${model}`);
+
+    // ====== PROMPT BUILDER ======
     const prompt = `
-You are an expert coach creating a clear, encouraging 30-day roadmap.
+Create a personalized 30-day roadmap for ${firstName}.
+Their main goal: ${goal}.
+What’s holding them back: ${stuck}.
 
-User name: ${firstName}
-Main goal: ${goal}
-Current struggle: ${stuck}
+Use the voice of Chris Villagracia (xGO GETTERSx).
 
-Write a short, punchy roadmap email they’ll receive immediately after filling out the form.
+Write as if you're talking directly to them:
+- Encourage without overdoing it.
+- Keep sentences short and real.
+- Include relevant emojis for emotion.
+- Give 3–5 clear steps or phases.
+- End with a "Next Move" or "Stay consistent" line.
 
-Requirements:
-- Warm, confident tone.
-- 3–5 clear phases or steps (with time frames).
-- Bullet points where helpful.
-- End with a simple call-to-action to reply or book a call.
+Make it feel like Chris is personally guiding them toward their comeback.
     `.trim();
 
-    // Call OpenAI
+    // ====== GENERATE RESPONSE ======
     const completion = await client.chat.completions.create({
-      model: 'gpt-4.1-mini',
+      model,
       messages: [
-        { role: 'system', content: 'You write concise, clear, highly practical roadmaps.' },
+        { role: 'system', content: CHRIS_TONE },
         { role: 'user', content: prompt }
       ],
-      temperature: 0.7,
-      max_tokens: 600
+      temperature: 0.9,
+      max_tokens: 800
     });
 
-    const roadmapText = completion.choices[0]?.message?.content || '';
+    const roadmapText =
+      completion.choices[0]?.message?.content?.trim() ||
+      'Roadmap unavailable.';
 
-    // Log for debugging
-    console.log('✅ Generated roadmap:\n', roadmapText);
+    console.log('✅ Generated Roadmap:\n', roadmapText);
 
-    // Respond to the webhook caller (GHL)
-    return res.status(200).json({
+    res.status(200).json({
       ok: true,
-      message: 'Roadmap generated successfully.',
+      model,
       roadmap: roadmapText
     });
-
   } catch (error) {
     console.error('❌ Error in /api/roadmap:', error.response?.data || error.message || error);
-    return res.status(500).json({
+
+    const status = error.status || error.response?.status || 500;
+    res.status(status).json({
       ok: false,
-      message: 'Failed to generate roadmap.',
-      error: error.message || 'Unknown error'
+      error:
+        status === 429
+          ? 'OpenAI quota/billing issue — check your plan or key.'
+          : 'Roadmap generation failed.'
     });
   }
 });
 
-// ----- START SERVER -----
+// ====== START SERVER ======
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`xGO GETTERSx Roadmap API running on port ${PORT}`);
+  console.log(`🚀 xGO GETTERSx backend running on port ${PORT}`);
 });

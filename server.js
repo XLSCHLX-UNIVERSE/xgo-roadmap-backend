@@ -260,4 +260,5 @@ app.post('/api/roadmap', (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 xGO GETTERSx backend running on port ${PORT}`);
+  console.log("GHL API Key exists:", !!process.env.GHL_API_KEY);
 });

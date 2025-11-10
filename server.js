@@ -82,25 +82,13 @@ function extractContactInfo(body) {
     contact?.contact_id ||
     null;
 
-  const urgency =
-    body["How soon do you want to see change?"] ||
-    body.urgency ||
-    '';
-
-  const clientEmail =
-    body.email ||
-    contact?.email ||
-    body.contact_details?.email ||
-    null;
-
-  return { firstName, goal, stuck, level, contactId, urgency, clientEmail };
+  return { firstName, goal, stuck, level, contactId };
 }
 
 // ====== HELPER: Choose model by tier ======
 function chooseModel(levelRaw = '') {
   const level = String(levelRaw || '').toLowerCase();
 
-  // Free / $300 / $900 tiers → GPT-4o
   if (
     level.includes('level 1') ||
     level.includes('spark') ||
@@ -113,7 +101,6 @@ function chooseModel(levelRaw = '') {
     return 'gpt-4o';
   }
 
-  // Higher tiers → GPT-5-nano
   return 'gpt-5-nano';
 }
 
@@ -130,14 +117,14 @@ Program level or offer they came through: ${level}
 You are Chris. Create a **simple, real, 3-goal roadmap** in his exact style.
 
 Format & style rules:
-- Start with 1–2 supportive lines that show you see them. (Chris tone)
+- Start with 1–2 supportive lines that show you see them.
 - Then give **Goal 1, Goal 2, Goal 3**.
 - Under each goal, give **3 concrete ideas / actions**.
 - Make it feel doable for the next 30 days.
 - Short paragraphs. No walls of text.
 - Bold key phrases that should hit.
 - Use emojis naturally for emotion & energy, never spam.
-- No therapy-speak. No corporate-speak. Real, grounded, personal.
+- No therapy-speak. No corporate-speak.
 - End with a bold **Next Move** that tells them exactly what to do today.
 - It should feel like: "Good. Let’s hit it. 🧠🔥 Here’s your roadmap..."
   `.trim();
@@ -159,9 +146,7 @@ async function generateRoadmap({ model, prompt }) {
     });
 
     const text = completion.choices[0]?.message?.content?.trim();
-    if (text) {
-      return { text, model, source: 'primary' };
-    }
+    if (text) return { text, model, source: 'primary' };
 
     throw new Error('Empty completion from primary model');
   } catch (err) {
@@ -191,69 +176,48 @@ async function generateRoadmap({ model, prompt }) {
   }
 }
 
-// ====== EMAIL TRANSPORT (SMTP) ======
+// ====== EMAIL TRANSPORT (OPTIONAL) ======
 let transporter = null;
 
 if (
   process.env.SMTP_HOST &&
+  process.env.SMTP_PORT &&
   process.env.SMTP_USER &&
-  process.env.SMTP_PASS
+  process.env.SMTP_PASS &&
+  process.env.ROADMAP_NOTIFY_EMAIL
 ) {
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
-    port: Number(process.env.SMTP_PORT) || 587,
+    port: Number(process.env.SMTP_PORT),
     secure: process.env.SMTP_SECURE === 'true',
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS
     }
   });
-
-  console.log('📨 SMTP transporter configured.');
+  console.log('📨 SMTP configured: roadmap emails enabled.');
 } else {
-  console.warn(
-    '⚠️ SMTP not fully configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and ROADMAP_NOTIFY_EMAIL to enable email.'
+  console.log(
+    '⚠️ SMTP not configured. Roadmaps will be logged only (no auto emails).'
   );
 }
 
-// ====== HELPER: Email roadmap to you (Chris) ======
+// ====== HELPER: Email roadmap to you (if SMTP configured) ======
 async function emailRoadmapToOwner({
   firstName,
   contactId,
   clientEmail,
   goal,
   stuck,
-  roadmapText,
-  urgency
+  roadmapText
 }) {
-  if (!transporter) {
-    console.warn('⚠️ No email transporter configured; skipping email send.');
-    return;
-  }
-
-  if (!process.env.ROADMAP_NOTIFY_EMAIL) {
-    console.warn('⚠️ ROADMAP_NOTIFY_EMAIL not set; skipping email send.');
-    return;
-  }
+  if (!transporter) return;
 
   const to = process.env.ROADMAP_NOTIFY_EMAIL;
-  const from = process.env.EMAIL_FROM || process.env.ROADMAP_NOTIFY_EMAIL;
+  if (!to) return;
 
-  // Build smart subject
-  const namePart = firstName ? firstName.trim() : 'New Lead';
-  const goalPart = goal
-    ? goal.split(' ').slice(0, 4).join(' ')
-    : 'No Goal';
-  const urgencyPart =
-    urgency && urgency.toLowerCase().includes('asap')
-      ? '🚀 Ready Now'
-      : urgency && urgency.toLowerCase().includes('week')
-      ? '⏰ Within a Week'
-      : urgency && urgency.toLowerCase().includes('month')
-      ? '🕓 Within a Month'
-      : '🌱 Normal Priority';
-
-  const subject = `✳️ Roadmap – ${namePart} | ${goalPart} | ${urgencyPart}`;
+  const from = process.env.EMAIL_FROM || to;
+  const subject = `New Simple Roadmap - ${firstName || 'New Lead'}`;
 
   const text = `
 You’ve got a new roadmap to review and send. 🚀
@@ -264,7 +228,6 @@ Contact ID: ${contactId || 'N/A'}
 Client Email: ${clientEmail || 'N/A'}
 Main Goal: ${goal || 'N/A'}
 Stuck On: ${stuck || 'N/A'}
-Urgency: ${urgency || 'N/A'}
 
 --- ROADMAP (COPY/PASTE TO CLIENT) ---
 ${roadmapText}
@@ -273,18 +236,10 @@ ${roadmapText}
 `.trim();
 
   try {
-    await transporter.sendMail({
-      from,
-      to,
-      subject,
-      text
-    });
-    console.log(`📧 Roadmap emailed to ${to} | Subject: ${subject}`);
+    await transporter.sendMail({ from, to, subject, text });
+    console.log(`📧 Roadmap emailed to ${to}`);
   } catch (err) {
-    console.error(
-      '❌ Error sending roadmap email:',
-      err.response?.data || err.message || err
-    );
+    console.error('❌ Error sending roadmap email:', err.message || err);
   }
 }
 
@@ -293,42 +248,38 @@ app.post('/api/roadmap', (req, res) => {
   console.log('🔔 Incoming GHL webhook:');
   console.log(JSON.stringify(req.body, null, 2));
 
-  const {
-    firstName,
-    goal,
-    stuck,
-    level,
-    contactId,
-    urgency,
-    clientEmail
-  } = extractContactInfo(req.body);
-
+  const { firstName, goal, stuck, level, contactId } = extractContactInfo(req.body);
   const model = chooseModel(level);
   const prompt = buildPrompt({ firstName, goal, stuck, level });
 
-  // 1) Respond fast so GHL doesn't timeout
+  const clientEmail =
+    req.body.email ||
+    req.body.contact?.email ||
+    req.body.contact_details?.email ||
+    null;
+
+  // Respond fast so GHL is happy
   res.status(200).json({
     ok: true,
     message: 'Roadmap request received. AI is generating their custom roadmap now.'
   });
 
-  // 2) Generate roadmap + email it to you (fire-and-forget)
+  // Generate roadmap (and optionally email/log it)
   (async () => {
     const { text: roadmapText, model: usedModel, source } =
       await generateRoadmap({ model, prompt });
 
     if (!roadmapText) {
-      console.error('🚫 No roadmap generated; skipping email/manual send.');
+      console.error('🚫 No roadmap generated; skipping.');
       return;
     }
 
     console.log('✅ Generated Roadmap with', usedModel, `(${source})`);
-    console.log('✉️ ROADMAP READY (visible in logs and emailed if SMTP is set):');
+    console.log('✉️ ROADMAP READY (copy this to send to client):');
     console.log('--- CONTACT INFO ---');
     console.log('Name:', firstName || 'N/A');
     console.log('Contact ID:', contactId || 'N/A');
     console.log('Client Email:', clientEmail || 'N/A');
-    console.log('Urgency:', urgency || 'N/A');
     console.log('--- ROADMAP ---');
     console.log(roadmapText);
     console.log('--------------------');
@@ -339,8 +290,7 @@ app.post('/api/roadmap', (req, res) => {
       clientEmail,
       goal,
       stuck,
-      roadmapText,
-      urgency
+      roadmapText
     });
   })().catch((err) => {
     console.error('🔥 Unhandled error in background roadmap task:', err);

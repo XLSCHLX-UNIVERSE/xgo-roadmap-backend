@@ -3,7 +3,7 @@ require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const OpenAI = require('openai');
-const axios = require('axios');
+const nodemailer = require('nodemailer');
 
 const app = express();
 
@@ -40,8 +40,7 @@ Rules:
 - Warm, cinematic, human. Never robotic or corporate.
 `;
 
-// ====== HELPERS ======
-
+// ====== HELPER: Extract contact info from GHL webhook ======
 function extractContactInfo(body) {
   const contact =
     body.contact ||
@@ -77,7 +76,6 @@ function extractContactInfo(body) {
     body.tier ||
     'free';
 
-  // GHL contact id can appear in a few spots
   const contactId =
     body.contact_id ||
     contact?.id ||
@@ -87,10 +85,11 @@ function extractContactInfo(body) {
   return { firstName, goal, stuck, level, contactId };
 }
 
+// ====== HELPER: Choose model by tier ======
 function chooseModel(levelRaw = '') {
   const level = String(levelRaw || '').toLowerCase();
 
-  // Free / 300 / 900 tiers → GPT-4o
+  // Free / $300 / $900 tiers → GPT-4o
   if (
     level.includes('level 1') ||
     level.includes('spark') ||
@@ -103,10 +102,11 @@ function chooseModel(levelRaw = '') {
     return 'gpt-4o';
   }
 
-  // Higher tiers → GPT-5-nano (cheaper/faster w/ failover)
+  // Higher tiers → GPT-5-nano (fallback handled below)
   return 'gpt-5-nano';
 }
 
+// ====== HELPER: Build roadmap prompt ======
 function buildPrompt({ firstName, goal, stuck, level }) {
   return `
 The person just filled out Chris Villagracia's xGO GETTERSx roadmap form.
@@ -116,25 +116,23 @@ Main goal (their words): ${goal}
 Current struggle / what's making them feel stuck: ${stuck}
 Program level or offer they came through: ${level}
 
-You are Chris. Create a **simple, real, 3-goal roadmap** in his exact style:
+You are Chris. Create a **simple, real, 3-goal roadmap** in his exact style.
 
 Format & style rules:
-- Start with 1–2 supportive lines that show you see them.
-- Then give 3 clear Goals (Goal 1, Goal 2, Goal 3).
-- Under each goal, give 3 concrete Ideas / actions.
+- Start with 1–2 supportive lines that show you see them. (Chris tone)
+- Then give **Goal 1, Goal 2, Goal 3**.
+- Under each goal, give **3 concrete ideas / actions**.
 - Make it feel doable for the next 30 days.
-- Use bold for key phrases.
 - Short paragraphs. No walls of text.
-- Use emojis for emotion & energy, but never spam.
-- No therapy talk, no corporate talk. Straight, kind, practical.
-- End with a **Next Move** line that tells them exactly what to do today.
-
-This should feel like:
-"Good. Let’s hit it. 🧠🔥
-Here’s your roadmap…"
+- Bold key phrases that should hit.
+- Use emojis naturally for emotion & energy, never spam.
+- No therapy-speak. No corporate-speak. Real, grounded, personal.
+- End with a bold **Next Move** that tells them exactly what to do today.
+- It should feel like: "Good. Let’s hit it. 🧠🔥 Here’s your roadmap..."
   `.trim();
 }
 
+// ====== HELPER: Generate roadmap with failover ======
 async function generateRoadmap({ model, prompt }) {
   try {
     console.log(`🎯 Generating roadmap with ${model}...`);
@@ -150,13 +148,15 @@ async function generateRoadmap({ model, prompt }) {
     });
 
     const text = completion.choices[0]?.message?.content?.trim();
-    if (text) return { text, model, source: 'primary' };
+    if (text) {
+      return { text, model, source: 'primary' };
+    }
 
     throw new Error('Empty completion from primary model');
   } catch (err) {
     console.error('⚠️ Primary model error:', err.message || err);
 
-    // Failover to GPT-4o
+    // Failover → GPT-4o
     try {
       console.log('🔄 Falling back to gpt-4o...');
       const fallback = await client.chat.completions.create({
@@ -180,50 +180,84 @@ async function generateRoadmap({ model, prompt }) {
   }
 }
 
-async function saveRoadmapToGHL(contactId, roadmapText) {
-  if (!contactId) {
-    console.warn('⚠️ No contactId provided; cannot push roadmap to GHL.');
+// ====== EMAIL TRANSPORT (SMTP) ======
+let transporter = null;
+
+if (
+  process.env.SMTP_HOST &&
+  process.env.SMTP_USER &&
+  process.env.SMTP_PASS
+) {
+  transporter = nodemailer.createTransport({
+    host: process.env.SMTP_HOST,
+    port: Number(process.env.SMTP_PORT) || 587,
+    secure: process.env.SMTP_SECURE === 'true', // or use 465 + true if needed
+    auth: {
+      user: process.env.SMTP_USER,
+      pass: process.env.SMTP_PASS
+    }
+  });
+} else {
+  console.warn('⚠️ SMTP not fully configured. Roadmap emails will NOT be sent until SMTP_* and ROADMAP_NOTIFY_EMAIL are set.');
+}
+
+// ====== HELPER: Email roadmap to you (Chris) ======
+async function emailRoadmapToOwner({
+  firstName,
+  contactId,
+  clientEmail,
+  goal,
+  stuck,
+  roadmapText
+}) {
+  if (!transporter) {
+    console.warn('⚠️ No email transporter configured; skipping email send.');
     return;
   }
-  if (!process.env.GHL_API_KEY) {
-    console.warn('⚠️ Missing GHL_API_KEY env var; cannot push roadmap to GHL.');
+
+  if (!process.env.ROADMAP_NOTIFY_EMAIL) {
+    console.warn('⚠️ ROADMAP_NOTIFY_EMAIL not set; skipping email send.');
     return;
   }
-  if (!roadmapText) {
-    console.warn('⚠️ No roadmap text to save.');
-    return;
-  }
+
+  const to = process.env.ROADMAP_NOTIFY_EMAIL;
+  const from = process.env.EMAIL_FROM || process.env.ROADMAP_NOTIFY_EMAIL;
+
+  const subject = `New Simple Roadmap - ${firstName || 'New Lead'}`;
+
+  const text = `
+You’ve got a new roadmap to review and send. 🚀
+
+--- CONTACT INFO ---
+Name: ${firstName || 'N/A'}
+Contact ID: ${contactId || 'N/A'}
+Client Email: ${clientEmail || 'N/A'}
+Main Goal: ${goal || 'N/A'}
+Stuck On: ${stuck || 'N/A'}
+
+--- ROADMAP (COPY/PASTE TO CLIENT) ---
+${roadmapText}
+
+— xGO GETTERSx Auto-System
+`.trim();
 
   try {
-    console.log(`📨 Pushing roadmap to GHL contact ${contactId}...`);
-
-    // For GHL: use your AI Roadmap custom field unique key.
-    // From your screenshots / merge tag it's: {{contact.ai_roadmap}}
-    // So we send: customField: { ai_roadmap: "..." }
-    await axios({
-      method: 'put',
-      url: `https://rest.gohighlevel.com/v1/contacts/${contactId}`,
-      headers: {
-        Authorization: `Bearer ${process.env.GHL_API_KEY}`,
-        'Content-Type': 'application/json'
-      },
-      data: {
-        customField: {
-          ai_roadmap: roadmapText
-        }
-      }
+    await transporter.sendMail({
+      from,
+      to,
+      subject,
+      text
     });
-
-    console.log('✅ Roadmap saved to GHL contact field ai_roadmap.');
+    console.log(`📧 Roadmap emailed to ${to}`);
   } catch (err) {
     console.error(
-      '❌ Failed to save roadmap to GHL:',
+      '❌ Error sending roadmap email:',
       err.response?.data || err.message || err
     );
   }
 }
 
-// ====== MAIN WEBHOOK ROUTE (ASYNC, FIRE-AND-FORGET) ======
+// ====== MAIN WEBHOOK ROUTE ======
 app.post('/api/roadmap', (req, res) => {
   console.log('🔔 Incoming GHL webhook:');
   console.log(JSON.stringify(req.body, null, 2));
@@ -232,25 +266,46 @@ app.post('/api/roadmap', (req, res) => {
   const model = chooseModel(level);
   const prompt = buildPrompt({ firstName, goal, stuck, level });
 
-  // 1) Immediately acknowledge to GHL so it doesn't timeout.
+  const clientEmail =
+    req.body.email ||
+    req.body.contact?.email ||
+    req.body.contact_details?.email ||
+    null;
+
+  // 1) Respond fast so GHL is happy
   res.status(200).json({
     ok: true,
     message: 'Roadmap request received. AI is generating their custom roadmap now.'
   });
 
-  // 2) Generate & push roadmap in the background.
+  // 2) Generate roadmap + email to you
   (async () => {
     const { text: roadmapText, model: usedModel, source } =
       await generateRoadmap({ model, prompt });
 
     if (!roadmapText) {
-      console.error('🚫 No roadmap generated; skipping GHL update.');
+      console.error('🚫 No roadmap generated; skipping email/manual send.');
       return;
     }
 
-    console.log('✅ Generated Roadmap with', usedModel, `(${source}):\n`, roadmapText);
+    console.log('✅ Generated Roadmap with', usedModel, `(${source})`);
+    console.log('✉️ ROADMAP READY (also emailed if SMTP is set):');
+    console.log('--- CONTACT INFO ---');
+    console.log('Name:', firstName || 'N/A');
+    console.log('Contact ID:', contactId || 'N/A');
+    console.log('Client Email:', clientEmail || 'N/A');
+    console.log('--- ROADMAP ---');
+    console.log(roadmapText);
+    console.log('--------------------');
 
-    await saveRoadmapToGHL(contactId, roadmapText);
+    await emailRoadmapToOwner({
+      firstName,
+      contactId,
+      clientEmail,
+      goal,
+      stuck,
+      roadmapText
+    });
   })().catch((err) => {
     console.error('🔥 Unhandled error in background roadmap task:', err);
   });
@@ -260,5 +315,4 @@ app.post('/api/roadmap', (req, res) => {
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
   console.log(`🚀 xGO GETTERSx backend running on port ${PORT}`);
-  console.log("GHL API Key exists:", !!process.env.GHL_API_KEY);
 });

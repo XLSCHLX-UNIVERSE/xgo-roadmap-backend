@@ -82,7 +82,18 @@ function extractContactInfo(body) {
     contact?.contact_id ||
     null;
 
-  return { firstName, goal, stuck, level, contactId };
+  const urgency =
+    body["How soon do you want to see change?"] ||
+    body.urgency ||
+    '';
+
+  const clientEmail =
+    body.email ||
+    contact?.email ||
+    body.contact_details?.email ||
+    null;
+
+  return { firstName, goal, stuck, level, contactId, urgency, clientEmail };
 }
 
 // ====== HELPER: Choose model by tier ======
@@ -102,7 +113,7 @@ function chooseModel(levelRaw = '') {
     return 'gpt-4o';
   }
 
-  // Higher tiers → GPT-5-nano (fallback handled below)
+  // Higher tiers → GPT-5-nano
   return 'gpt-5-nano';
 }
 
@@ -191,14 +202,18 @@ if (
   transporter = nodemailer.createTransport({
     host: process.env.SMTP_HOST,
     port: Number(process.env.SMTP_PORT) || 587,
-    secure: process.env.SMTP_SECURE === 'true', // or use 465 + true if needed
+    secure: process.env.SMTP_SECURE === 'true',
     auth: {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS
     }
   });
+
+  console.log('📨 SMTP transporter configured.');
 } else {
-  console.warn('⚠️ SMTP not fully configured. Roadmap emails will NOT be sent until SMTP_* and ROADMAP_NOTIFY_EMAIL are set.');
+  console.warn(
+    '⚠️ SMTP not fully configured. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and ROADMAP_NOTIFY_EMAIL to enable email.'
+  );
 }
 
 // ====== HELPER: Email roadmap to you (Chris) ======
@@ -208,7 +223,8 @@ async function emailRoadmapToOwner({
   clientEmail,
   goal,
   stuck,
-  roadmapText
+  roadmapText,
+  urgency
 }) {
   if (!transporter) {
     console.warn('⚠️ No email transporter configured; skipping email send.');
@@ -223,7 +239,21 @@ async function emailRoadmapToOwner({
   const to = process.env.ROADMAP_NOTIFY_EMAIL;
   const from = process.env.EMAIL_FROM || process.env.ROADMAP_NOTIFY_EMAIL;
 
-  const subject = `New Simple Roadmap - ${firstName || 'New Lead'}`;
+  // Build smart subject
+  const namePart = firstName ? firstName.trim() : 'New Lead';
+  const goalPart = goal
+    ? goal.split(' ').slice(0, 4).join(' ')
+    : 'No Goal';
+  const urgencyPart =
+    urgency && urgency.toLowerCase().includes('asap')
+      ? '🚀 Ready Now'
+      : urgency && urgency.toLowerCase().includes('week')
+      ? '⏰ Within a Week'
+      : urgency && urgency.toLowerCase().includes('month')
+      ? '🕓 Within a Month'
+      : '🌱 Normal Priority';
+
+  const subject = `✳️ Roadmap – ${namePart} | ${goalPart} | ${urgencyPart}`;
 
   const text = `
 You’ve got a new roadmap to review and send. 🚀
@@ -234,6 +264,7 @@ Contact ID: ${contactId || 'N/A'}
 Client Email: ${clientEmail || 'N/A'}
 Main Goal: ${goal || 'N/A'}
 Stuck On: ${stuck || 'N/A'}
+Urgency: ${urgency || 'N/A'}
 
 --- ROADMAP (COPY/PASTE TO CLIENT) ---
 ${roadmapText}
@@ -248,7 +279,7 @@ ${roadmapText}
       subject,
       text
     });
-    console.log(`📧 Roadmap emailed to ${to}`);
+    console.log(`📧 Roadmap emailed to ${to} | Subject: ${subject}`);
   } catch (err) {
     console.error(
       '❌ Error sending roadmap email:',
@@ -262,23 +293,26 @@ app.post('/api/roadmap', (req, res) => {
   console.log('🔔 Incoming GHL webhook:');
   console.log(JSON.stringify(req.body, null, 2));
 
-  const { firstName, goal, stuck, level, contactId } = extractContactInfo(req.body);
+  const {
+    firstName,
+    goal,
+    stuck,
+    level,
+    contactId,
+    urgency,
+    clientEmail
+  } = extractContactInfo(req.body);
+
   const model = chooseModel(level);
   const prompt = buildPrompt({ firstName, goal, stuck, level });
 
-  const clientEmail =
-    req.body.email ||
-    req.body.contact?.email ||
-    req.body.contact_details?.email ||
-    null;
-
-  // 1) Respond fast so GHL is happy
+  // 1) Respond fast so GHL doesn't timeout
   res.status(200).json({
     ok: true,
     message: 'Roadmap request received. AI is generating their custom roadmap now.'
   });
 
-  // 2) Generate roadmap + email to you
+  // 2) Generate roadmap + email it to you (fire-and-forget)
   (async () => {
     const { text: roadmapText, model: usedModel, source } =
       await generateRoadmap({ model, prompt });
@@ -289,11 +323,12 @@ app.post('/api/roadmap', (req, res) => {
     }
 
     console.log('✅ Generated Roadmap with', usedModel, `(${source})`);
-    console.log('✉️ ROADMAP READY (also emailed if SMTP is set):');
+    console.log('✉️ ROADMAP READY (visible in logs and emailed if SMTP is set):');
     console.log('--- CONTACT INFO ---');
     console.log('Name:', firstName || 'N/A');
     console.log('Contact ID:', contactId || 'N/A');
     console.log('Client Email:', clientEmail || 'N/A');
+    console.log('Urgency:', urgency || 'N/A');
     console.log('--- ROADMAP ---');
     console.log(roadmapText);
     console.log('--------------------');
@@ -304,7 +339,8 @@ app.post('/api/roadmap', (req, res) => {
       clientEmail,
       goal,
       stuck,
-      roadmapText
+      roadmapText,
+      urgency
     });
   })().catch((err) => {
     console.error('🔥 Unhandled error in background roadmap task:', err);
